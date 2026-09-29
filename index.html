@@ -73,13 +73,21 @@
   }
   .card.recall .badge { background: var(--danger); }
   .card.service .badge { background: #B7791F; }
-  .card.recall .desc, .card.service .desc { color: #333; margin-top: 3px; }
+  .card.recall .desc, .card.service .desc { color: #333; margin-top: 3px; margin-left: 24px; }
   .card.recall a, .card.service a {
-    display: inline-block; margin-top: 6px; font-size: 12.5px;
+    display: inline-block; margin-top: 6px; margin-left: 24px; font-size: 12.5px;
     color: var(--accent); text-decoration: none; font-weight: 600;
   }
   .card.recall a:hover, .card.service a:hover { text-decoration: underline; }
   .card.error { background: #FFF4E5; border: 1px solid #ffd9a0; color: #7a4a00; }
+  .card-label {
+    display: flex; align-items: center; gap: 8px; cursor: pointer;
+  }
+  .card-label input[type="checkbox"] {
+    width: 16px; height: 16px; flex: 0 0 auto; cursor: pointer;
+  }
+  .card-label input[type="checkbox"]:disabled { cursor: not-allowed; }
+  .select-hint { font-size: 12px; color: var(--grey); margin: 2px 0 8px; }
   .footer-note { margin-top: 10px; font-size: 11px; color: #9aa0ab; }
 </style>
 </head>
@@ -136,6 +144,32 @@ function summarize(sortedMatches) {
   }).join(', ');
 }
 
+var currentVin = '';
+
+// Calcule la valeur a transmettre a JotForm a partir des cases actuellement
+// cochees dans #results (source unique de verite : ce que le concessionnaire
+// a reellement selectionne, pas la liste brute des campagnes detectees).
+function computeSelectionValue(vin) {
+  var checks = results.querySelectorAll('.campaign-check');
+  if (!checks.length) {
+    return 'VIN=' + vin + ' | Aucune campagne active';
+  }
+  var selected = [];
+  checks.forEach(function (chk) {
+    if (chk.checked) {
+      selected.push({ code: chk.getAttribute('data-code'), type: chk.getAttribute('data-type') });
+    }
+  });
+  if (!selected.length) {
+    return 'VIN=' + vin + ' | Aucune campagne selectionnee';
+  }
+  return 'VIN=' + vin + ' | ACTIF: ' + summarize(sortByType(selected));
+}
+
+function onSelectionChange() {
+  sendToJotform(computeSelectionValue(currentVin));
+}
+
 function sendToJotform(summary) {
   try {
     if (window.JFCustomWidget) {
@@ -172,21 +206,41 @@ function render(vin, matches, invalid) {
     results.appendChild(ok);
     sendToJotform('VIN=' + vin + ' | Aucune campagne active');
   } else {
+    var hint = document.createElement('div');
+    hint.className = 'select-hint';
+    hint.textContent = 'Les campagnes de RAPPEL sont incluses automatiquement. Cochez la ou les campagnes de SERVICE concernees par cette intervention.';
+    results.appendChild(hint);
+
     var sorted = sortByType(matches);
     sorted.forEach(function (c) {
       var isRecall = c.type === 'rappel';
       var card = document.createElement('div');
       card.className = 'card ' + (isRecall ? 'recall' : 'service');
-      var codeEl = document.createElement('div');
-      codeEl.className = 'code';
+
+      var label = document.createElement('label');
+      label.className = 'card-label';
+
+      var chk = document.createElement('input');
+      chk.type = 'checkbox';
+      chk.className = 'campaign-check';
+      chk.setAttribute('data-code', c.code);
+      chk.setAttribute('data-type', c.type);
+      chk.checked = isRecall; // RAPPEL coche et verrouille, SERVICE a cocher manuellement
+      if (isRecall) { chk.disabled = true; }
+      chk.addEventListener('change', onSelectionChange);
+      label.appendChild(chk);
+
       var badge = document.createElement('span');
       badge.className = 'badge';
       badge.textContent = isRecall ? 'RAPPEL' : 'SERVICE';
-      codeEl.appendChild(badge);
-      codeEl.appendChild(document.createTextNode(
-        (isRecall ? '⚠ Campagne de rappel active : ' : 'Campagne de service active : ') + c.code
-      ));
-      card.appendChild(codeEl);
+      label.appendChild(badge);
+
+      var codeText = document.createElement('span');
+      codeText.textContent = (isRecall ? '⚠ Campagne de rappel active : ' : 'Campagne de service disponible : ') + c.code;
+      label.appendChild(codeText);
+
+      card.appendChild(label);
+
       if (c.desc) {
         var descEl = document.createElement('div');
         descEl.className = 'desc';
@@ -203,7 +257,7 @@ function render(vin, matches, invalid) {
       }
       results.appendChild(card);
     });
-    sendToJotform('VIN=' + vin + ' | ACTIF: ' + summarize(sorted));
+    sendToJotform(computeSelectionValue(vin));
   }
   resize();
 }
@@ -211,6 +265,7 @@ function render(vin, matches, invalid) {
 function doCheck() {
   var vin = (input.value || '').trim().toUpperCase().replace(/\s+/g, '');
   input.value = vin;
+  currentVin = vin;
   if (!VIN_RE.test(vin)) {
     render(vin, [], true);
     return;
@@ -241,11 +296,11 @@ if (window.JFCustomWidget) {
       JFCustomWidget.sendSubmit({ value: '', valid: true });
       return;
     }
-    var matches = VIN_INDEX[vin] || [];
-    var sorted = sortByType(matches);
-    var value = sorted.length
-      ? 'VIN=' + vin + ' | ACTIF: ' + summarize(sorted)
-      : 'VIN=' + vin + ' | Aucune campagne active';
+    // Source unique de verite : l'etat reel des cases cochees a l'instant
+    // de la soumission (et non un recalcul depuis VIN_INDEX), pour que la
+    // valeur envoyee corresponde exactement a ce que le concessionnaire a
+    // selectionne dans le formulaire.
+    var value = computeSelectionValue(vin);
     JFCustomWidget.sendSubmit({ value: value, valid: true });
   });
 }
