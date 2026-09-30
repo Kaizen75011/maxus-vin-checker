@@ -146,6 +146,13 @@ function summarize(sortedMatches) {
 
 var currentVin = '';
 
+// true uniquement si une verification complete (format valide) a ete
+// effectuee pour le VIN actuellement saisi. Sert a piloter le flag "valid"
+// envoye a JotForm : tant qu'aucune verification n'a eu lieu (ou que le VIN
+// a ete modifie depuis la derniere verification), le champ doit rester
+// invalide pour que le caractere "obligatoire" du champ ait un effet reel.
+var checkCompleted = false;
+
 // Calcule la valeur a transmettre a JotForm a partir des cases actuellement
 // cochees dans #results (source unique de verite : ce que le concessionnaire
 // a reellement selectionne, pas la liste brute des campagnes detectees).
@@ -173,7 +180,7 @@ function onSelectionChange() {
 function sendToJotform(summary) {
   try {
     if (window.JFCustomWidget) {
-      JFCustomWidget.sendData({ value: summary, valid: true });
+      JFCustomWidget.sendData({ value: summary, valid: checkCompleted });
     }
   } catch (e) { /* widget SDK non disponible (ex: apercu hors JotForm) */ }
 }
@@ -190,6 +197,7 @@ function render(vin, matches, invalid) {
   results.innerHTML = '';
 
   if (invalid) {
+    checkCompleted = false;
     var err = document.createElement('div');
     err.className = 'card error';
     err.textContent = 'Format VIN invalide : 17 caracteres attendus (lettres et chiffres, sans I, O, Q).';
@@ -198,6 +206,8 @@ function render(vin, matches, invalid) {
     resize();
     return;
   }
+
+  checkCompleted = true;
 
   if (!matches.length) {
     var ok = document.createElement('div');
@@ -280,6 +290,16 @@ input.addEventListener('keydown', function (e) {
 });
 input.addEventListener('input', function () {
   input.value = input.value.toUpperCase();
+  // Si le VIN est modifie apres une verification reussie, on invalide :
+  // le concessionnaire doit re-cliquer sur "Verifier" pour le nouveau VIN
+  // avant de pouvoir soumettre (evite qu'un ancien resultat "valide" reste
+  // associe a un VIN different de celui finalement saisi).
+  if (checkCompleted && input.value.trim() !== currentVin) {
+    checkCompleted = false;
+    results.innerHTML = '';
+    sendToJotform('VIN modifie - cliquez sur Verifier avant de soumettre');
+    resize();
+  }
 });
 
 // ---- Integration JotForm Widget SDK ----
@@ -288,12 +308,18 @@ if (window.JFCustomWidget) {
     try {
       var settings = JFCustomWidget.getWidgetSettings ? JFCustomWidget.getWidgetSettings() : null;
     } catch (e) {}
+    // Tant qu'aucune verification n'a ete faite, le champ est invalide -
+    // necessaire pour que le toggle "Obligatoire" du champ, cote JotForm,
+    // bloque reellement la soumission tant que le VIN n'a pas ete verifie.
+    try { JFCustomWidget.sendData({ value: '', valid: false }); } catch (e) {}
     resize();
   });
   JFCustomWidget.subscribe('submit', function () {
     var vin = (input.value || '').trim().toUpperCase();
-    if (!vin) {
-      JFCustomWidget.sendSubmit({ value: '', valid: true });
+    // Bloque la soumission si : champ vide, format jamais verifie avec succes,
+    // ou VIN modifie depuis la derniere verification (currentVin desynchronise).
+    if (!vin || !checkCompleted || vin !== currentVin) {
+      JFCustomWidget.sendSubmit({ value: '', valid: false });
       return;
     }
     // Source unique de verite : l'etat reel des cases cochees a l'instant
