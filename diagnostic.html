@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Diagnostic - Widget VIN Maxus</title>
+<style>
+  body {
+    font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    max-width: 700px;
+    margin: 30px auto;
+    padding: 0 16px;
+    color: #1c1c1c;
+  }
+  h1 { font-size: 20px; color: #1E2761; }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 16px;
+    border-radius: 8px;
+    margin-bottom: 12px;
+    font-size: 15px;
+    border: 1px solid #D9DEE8;
+  }
+  .pending { background: #F3F4F8; color: #595959; }
+  .ok { background: #EAF7EC; color: #1E7B34; border-color: #b7e0bf; }
+  .fail { background: #FDECEA; color: #B3261E; border-color: #f3c6c2; }
+  .icon { font-size: 18px; }
+  .detail { font-size: 12px; color: #595959; margin-top: 4px; }
+  .conclusion {
+    margin-top: 24px;
+    padding: 16px;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    display: none;
+  }
+  .instructions {
+    margin-top: 20px;
+    font-size: 13px;
+    color: #595959;
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+<h1>Diagnostic - chargement du widget VIN Maxus</h1>
+<p>Cette page ne modifie rien et n'envoie aucune donnée. Elle teste juste si ton reseau/ordinateur arrive a charger les scripts necessaires au bon fonctionnement du widget VIN dans le formulaire JotForm. Laisse-la charger quelques secondes puis fais une capture d'ecran du resultat.</p>
+
+<div id="row-control" class="row pending">
+  <span class="icon">&#8987;</span>
+  <div>
+    <div>Test de controle (script generique, hors JotForm)</div>
+    <div class="detail" id="detail-control">Chargement en cours...</div>
+  </div>
+</div>
+
+<div id="row-jotform" class="row pending">
+  <span class="icon">&#8987;</span>
+  <div>
+    <div>Script JotForm (SDK du widget - cdn01.jotfor.ms)</div>
+    <div class="detail" id="detail-jotform">Chargement en cours...</div>
+  </div>
+</div>
+
+<div id="row-jsjotform" class="row pending">
+  <span class="icon">&#8987;</span>
+  <div>
+    <div>Script JotForm (SDK du widget - js.jotform.com)</div>
+    <div class="detail" id="detail-jsjotform">Chargement en cours...</div>
+  </div>
+</div>
+
+<div id="conclusion" class="conclusion"></div>
+
+<div class="instructions">
+  Une fois que les 3 lignes ci-dessus affichent un resultat (coche verte ou croix rouge), fais une capture d'ecran de toute la page et envoie-la. Pas besoin d'ouvrir une quelconque console ou outil developpeur.
+</div>
+
+<script>
+  function setResult(rowId, detailId, ok, text) {
+    var row = document.getElementById(rowId);
+    var detail = document.getElementById(detailId);
+    row.className = 'row ' + (ok ? 'ok' : 'fail');
+    row.querySelector('.icon').innerHTML = ok ? '&#9989;' : '&#10060;';
+    detail.textContent = text;
+  }
+
+  function testScript(url, rowId, detailId, okText, failText, timeoutMs) {
+    var done = false;
+    var timer = setTimeout(function () {
+      if (!done) {
+        done = true;
+        setResult(rowId, detailId, false, failText + ' (delai depasse - le script ne repond pas apres ' + (timeoutMs/1000) + 's)');
+      }
+    }, timeoutMs);
+    var s = document.createElement('script');
+    s.src = url;
+    s.onload = function () {
+      if (!done) {
+        done = true;
+        clearTimeout(timer);
+        setResult(rowId, detailId, true, okText);
+        checkConclusion();
+      }
+    };
+    s.onerror = function () {
+      if (!done) {
+        done = true;
+        clearTimeout(timer);
+        setResult(rowId, detailId, false, failText + ' (le navigateur a signale une erreur de chargement - bloque ou inaccessible depuis ce reseau)');
+        checkConclusion();
+      }
+    };
+    document.head.appendChild(s);
+  }
+
+  var resultsSeen = 0;
+  var totalTests = 3;
+  var jotformAnyOk = false;
+  var controlOk = null;
+
+  function checkConclusion() {
+    resultsSeen++;
+    if (resultsSeen < totalTests) return;
+    var el = document.getElementById('conclusion');
+    el.style.display = 'block';
+    var jfOk = document.getElementById('row-jotform').className.indexOf('ok') !== -1;
+    var jfOk2 = document.getElementById('row-jsjotform').className.indexOf('ok') !== -1;
+    var ctrlOk = document.getElementById('row-control').className.indexOf('ok') !== -1;
+    if ((jfOk || jfOk2) ) {
+      el.style.background = '#EAF7EC'; el.style.color = '#1E7B34';
+      el.textContent = 'Au moins un des scripts JotForm a charge correctement. Le probleme vient probablement d\'autre chose que du reseau.';
+    } else if (ctrlOk && !jfOk && !jfOk2) {
+      el.style.background = '#FDECEA'; el.style.color = '#B3261E';
+      el.textContent = 'Le script de controle charge normalement, mais les deux scripts JotForm echouent specifiquement. Cela pointe vers un blocage reseau/pare-feu cible sur les domaines JotForm (jotfor.ms / js.jotform.com), probablement au niveau du reseau de ce poste ou du concessionnaire.';
+    } else if (!ctrlOk) {
+      el.style.background = '#FDECEA'; el.style.color = '#B3261E';
+      el.textContent = 'Meme le script de controle echoue : il semble y avoir un probleme de connexion internet general sur ce poste au moment du test, pas specifique a JotForm.';
+    }
+  }
+
+  testScript(
+    'https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js',
+    'row-control', 'detail-control',
+    'Charge avec succes.',
+    'Echec du chargement.',
+    8000
+  );
+  testScript(
+    'https://cdn01.jotfor.ms/s/umd/latest/for-widget.js',
+    'row-jotform', 'detail-jotform',
+    'Charge avec succes. JFCustomWidget disponible : ' + 'EN_COURS',
+    'Echec du chargement.',
+    8000
+  );
+  testScript(
+    'https://js.jotform.com/JFCustomWidget.min.js',
+    'row-jsjotform', 'detail-jsjotform',
+    'Charge avec succes.',
+    'Echec du chargement.',
+    8000
+  );
+</script>
+</body>
+</html>
