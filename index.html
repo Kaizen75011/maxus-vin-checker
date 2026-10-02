@@ -303,30 +303,70 @@ input.addEventListener('input', function () {
 });
 
 // ---- Integration JotForm Widget SDK ----
+//
+// IMPORTANT : le champ widget N'EST PAS un champ "Obligatoire" cote JotForm
+// (ce type de champ - Iframe Embed - n'a pas de toggle Required natif, et la
+// tentative de le forcer via une Condition "Require" s'est averee cassee en
+// production - cf. historique). Il ne faut donc JAMAIS envoyer valid:false a
+// la soumission finale : sur un formulaire long (22 pages), JotForm peut
+// recharger l'iframe du widget en cours de route (page revisitee, iframe
+// sorti puis remis dans le DOM, etc.), ce qui reinitialise TOUTES les
+// variables JS (checkCompleted, currentVin) a leur valeur de depart. Avant
+// ce correctif, le handler 'submit' envoyait alors {value:'', valid:false},
+// ce qui ECRASAIT la bonne valeur deja synchronisee via sendData et
+// expliquait a la fois l'absence de mail d'alerte ("CONTAINS ACTIF:" ne
+// matchait plus) et le champ vide dans le compte-rendu de soumission.
+//
+// Le correctif : a la soumission, si l'etat live (cases cochees) est
+// disponible on l'utilise (source la plus fiable, reflete exactement la
+// selection du concessionnaire) ; sinon on RECALCULE depuis le dataset
+// embarque (VIN_INDEX, toujours present meme apres un rechargement d'iframe)
+// avec la selection par defaut (RAPPEL inclus, SERVICE non coche), plutot
+// que d'envoyer une valeur vide qui efface tout.
 if (window.JFCustomWidget) {
   JFCustomWidget.subscribe('ready', function () {
     try {
       var settings = JFCustomWidget.getWidgetSettings ? JFCustomWidget.getWidgetSettings() : null;
     } catch (e) {}
-    // Tant qu'aucune verification n'a ete faite, le champ est invalide -
-    // necessaire pour que le toggle "Obligatoire" du champ, cote JotForm,
-    // bloque reellement la soumission tant que le VIN n'a pas ete verifie.
-    try { JFCustomWidget.sendData({ value: '', valid: false }); } catch (e) {}
+    // Champ non obligatoire : valid:true des le depart pour ne jamais bloquer
+    // la soumission, meme si l'iframe est (re)initialise tardivement.
+    try { JFCustomWidget.sendData({ value: '', valid: true }); } catch (e) {}
     resize();
   });
   JFCustomWidget.subscribe('submit', function () {
     var vin = (input.value || '').trim().toUpperCase();
-    // Bloque la soumission si : champ vide, format jamais verifie avec succes,
-    // ou VIN modifie depuis la derniere verification (currentVin desynchronise).
-    if (!vin || !checkCompleted || vin !== currentVin) {
-      JFCustomWidget.sendSubmit({ value: '', valid: false });
+
+    if (!vin) {
+      JFCustomWidget.sendSubmit({ value: '', valid: true });
       return;
     }
-    // Source unique de verite : l'etat reel des cases cochees a l'instant
-    // de la soumission (et non un recalcul depuis VIN_INDEX), pour que la
-    // valeur envoyee corresponde exactement a ce que le concessionnaire a
-    // selectionne dans le formulaire.
-    var value = computeSelectionValue(vin);
+
+    if (!VIN_RE.test(vin)) {
+      JFCustomWidget.sendSubmit({ value: 'VIN=' + vin + ' | Format invalide', valid: true });
+      return;
+    }
+
+    var value;
+    var liveChecks = results.querySelectorAll('.campaign-check');
+    if (checkCompleted && vin === currentVin && liveChecks.length) {
+      // Cas normal : l'iframe est restee active depuis la verification,
+      // on prend l'etat exact des cases cochees par le concessionnaire.
+      value = computeSelectionValue(vin);
+    } else {
+      // Cas degrade (iframe rechargee entre la verification et la
+      // soumission finale, ou verification jamais faite explicitement) :
+      // on recalcule depuis le dataset embarque pour ne jamais perdre
+      // l'information d'une campagne active, notamment un RAPPEL.
+      var matches = VIN_INDEX[vin] || [];
+      if (!matches.length) {
+        value = 'VIN=' + vin + ' | Aucune campagne active';
+      } else {
+        var defaultSelected = matches.filter(function (m) { return m.type === 'rappel'; });
+        value = defaultSelected.length
+          ? 'VIN=' + vin + ' | ACTIF: ' + summarize(sortByType(defaultSelected)) + ' (selection par defaut - RAPPEL)'
+          : 'VIN=' + vin + ' | Campagne(s) SERVICE disponible(s), a verifier manuellement (non confirmees a la soumission)';
+      }
+    }
     JFCustomWidget.sendSubmit({ value: value, valid: true });
   });
 }
