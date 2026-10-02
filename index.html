@@ -153,6 +153,63 @@ var currentVin = '';
 // invalide pour que le caractere "obligatoire" du champ ait un effet reel.
 var checkCompleted = false;
 
+// ---- Persistance inter-rechargement (sessionStorage) ----
+//
+// Sur un formulaire long (22 pages), JotForm "lazy-load" les iframes des
+// champs Widget : l'iframe d'une page deja visitee peut etre entierement
+// dechargee (src videe) puis rechargee a froid plus tard (ex: au moment de
+// la soumission finale). Un rechargement a froid reinitialise TOUT l'etat
+// JS (currentVin, checkCompleted) ET le DOM (l'input #vinInput redevient
+// vide) : contrairement a un simple changement de variables, il n'y a plus
+// AUCUNE trace du VIN saisi par le concessionnaire dans l'iframe elle-meme.
+// On ne peut donc pas se fier a input.value au moment de 'submit'.
+//
+// sessionStorage, lui, est attache a l'origine de l'iframe (le site GitHub
+// Pages) et survit a un rechargement de cette iframe au sein du meme onglet
+// (il n'est efface qu'a la fermeture de l'onglet) : on l'utilise comme
+// memoire externe pour restaurer automatiquement, au prochain 'ready', le
+// dernier VIN verifie et la selection de campagnes du concessionnaire.
+var STORAGE_KEY = 'maxusVinCheckerState_v1';
+
+function getSelectedCodes() {
+  return Array.prototype.map.call(
+    results.querySelectorAll('.campaign-check:checked'),
+    function (c) { return c.getAttribute('data-code'); }
+  );
+}
+
+function saveState() {
+  try {
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify({
+      vin: currentVin,
+      checkCompleted: checkCompleted,
+      selectedCodes: getSelectedCodes(),
+    }));
+  } catch (e) { /* sessionStorage indisponible (navigation privee stricte, etc.) */ }
+}
+
+function clearState() {
+  try { sessionStorage.removeItem(STORAGE_KEY); } catch (e) {}
+}
+
+// Tente de restaurer un etat precedemment sauvegarde (apres rechargement
+// a froid de l'iframe). Retourne true si une restauration a eu lieu.
+function restoreState() {
+  try {
+    var raw = sessionStorage.getItem(STORAGE_KEY);
+    if (!raw) return false;
+    var state = JSON.parse(raw);
+    if (!state || !state.vin) return false;
+    input.value = state.vin;
+    currentVin = state.vin;
+    var matches = VIN_INDEX[state.vin] || [];
+    render(state.vin, matches, false, state.selectedCodes || []);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 // Calcule la valeur a transmettre a JotForm a partir des cases actuellement
 // cochees dans #results (source unique de verite : ce que le concessionnaire
 // a reellement selectionne, pas la liste brute des campagnes detectees).
@@ -175,6 +232,7 @@ function computeSelectionValue(vin) {
 
 function onSelectionChange() {
   sendToJotform(computeSelectionValue(currentVin));
+  saveState();
 }
 
 function sendToJotform(summary) {
@@ -193,11 +251,12 @@ function resize() {
   } catch (e) {}
 }
 
-function render(vin, matches, invalid) {
+function render(vin, matches, invalid, preSelectedCodes) {
   results.innerHTML = '';
 
   if (invalid) {
     checkCompleted = false;
+    clearState();
     var err = document.createElement('div');
     err.className = 'card error';
     err.textContent = 'Format VIN invalide : 17 caracteres attendus (lettres et chiffres, sans I, O, Q).';
@@ -215,6 +274,7 @@ function render(vin, matches, invalid) {
     ok.textContent = 'Aucune campagne active trouvee pour le VIN ' + vin + '.';
     results.appendChild(ok);
     sendToJotform('VIN=' + vin + ' | Aucune campagne active');
+    saveState();
   } else {
     var hint = document.createElement('div');
     hint.className = 'select-hint';
@@ -235,7 +295,10 @@ function render(vin, matches, invalid) {
       chk.className = 'campaign-check';
       chk.setAttribute('data-code', c.code);
       chk.setAttribute('data-type', c.type);
-      chk.checked = isRecall; // RAPPEL coche et verrouille, SERVICE a cocher manuellement
+      // RAPPEL coche et verrouille ; SERVICE coche uniquement si deja
+      // selectionne par le concessionnaire avant un rechargement de l'iframe
+      // (restauration via preSelectedCodes), sinon a cocher manuellement.
+      chk.checked = isRecall || (preSelectedCodes && preSelectedCodes.indexOf(c.code) !== -1);
       if (isRecall) { chk.disabled = true; }
       chk.addEventListener('change', onSelectionChange);
       label.appendChild(chk);
@@ -268,6 +331,7 @@ function render(vin, matches, invalid) {
       results.appendChild(card);
     });
     sendToJotform(computeSelectionValue(vin));
+    saveState();
   }
   resize();
 }
@@ -297,6 +361,7 @@ input.addEventListener('input', function () {
   if (checkCompleted && input.value.trim() !== currentVin) {
     checkCompleted = false;
     results.innerHTML = '';
+    clearState();
     sendToJotform('VIN modifie - cliquez sur Verifier avant de soumettre');
     resize();
   }
@@ -304,33 +369,48 @@ input.addEventListener('input', function () {
 
 // ---- Integration JotForm Widget SDK ----
 //
-// IMPORTANT : le champ widget N'EST PAS un champ "Obligatoire" cote JotForm
-// (ce type de champ - Iframe Embed - n'a pas de toggle Required natif, et la
-// tentative de le forcer via une Condition "Require" s'est averee cassee en
-// production - cf. historique). Il ne faut donc JAMAIS envoyer valid:false a
-// la soumission finale : sur un formulaire long (22 pages), JotForm peut
-// recharger l'iframe du widget en cours de route (page revisitee, iframe
-// sorti puis remis dans le DOM, etc.), ce qui reinitialise TOUTES les
-// variables JS (checkCompleted, currentVin) a leur valeur de depart. Avant
-// ce correctif, le handler 'submit' envoyait alors {value:'', valid:false},
-// ce qui ECRASAIT la bonne valeur deja synchronisee via sendData et
-// expliquait a la fois l'absence de mail d'alerte ("CONTAINS ACTIF:" ne
-// matchait plus) et le champ vide dans le compte-rendu de soumission.
+// Le champ est bien enregistre cote JotForm comme un vrai champ Widget
+// (data-type="control_widget", widgetType="field" - confirme via la
+// Question Properties / l'inspection du DOM du formulaire publie), donc la
+// valeur soumise EST normalement persistee et exploitable par les
+// conditions de notification ("CONTAINS ACTIF:"). Le probleme n'est pas
+// l'absence de persistance cote JotForm, mais la PERTE DE L'ETAT CÔTÉ
+// WIDGET avant que cette valeur soit (re)calculee :
 //
-// Le correctif : a la soumission, si l'etat live (cases cochees) est
-// disponible on l'utilise (source la plus fiable, reflete exactement la
-// selection du concessionnaire) ; sinon on RECALCULE depuis le dataset
-// embarque (VIN_INDEX, toujours present meme apres un rechargement d'iframe)
-// avec la selection par defaut (RAPPEL inclus, SERVICE non coche), plutot
-// que d'envoyer une valeur vide qui efface tout.
+// Sur un formulaire long (22 pages), JotForm "lazy-load" les iframes des
+// champs Widget (cf. loadLazyWidgetFrame / applyWidgetFrameSrc cote
+// JotForm) : l'iframe d'une page deja visitee peut etre completement
+// dechargee puis RECHARGEE A FROID plus tard (notamment au moment de la
+// soumission finale, 16 pages apres la verification du VIN). Un tel
+// rechargement a froid reinitialise non seulement les variables JS
+// (checkCompleted, currentVin) mais aussi le DOM : #vinInput redevient
+// litteralement vide, sans aucune trace du VIN tape par le concessionnaire.
+// Se fier a input.value au moment de 'submit' ne suffit donc pas (c'etait
+// la limite du premier correctif).
+//
+// Le correctif definitif : sessionStorage (attache a l'origine de l'iframe,
+// donc PAS efface par un rechargement de l'iframe elle-meme) sert de
+// memoire externe. A chaque verification ou changement de selection, l'etat
+// (VIN + campagnes cochees) est sauvegarde via saveState(). Au prochain
+// 'ready' (y compris apres un rechargement a froid), restoreState() relit
+// cet etat, repeuple #vinInput et les cases a cocher, et resynchronise
+// immediatement JotForm via sendData - avant meme que 'submit' soit
+// declenche. Le handler 'submit' garde en complement son recalcul depuis
+// VIN_INDEX comme filet de securite si sessionStorage est indisponible.
 if (window.JFCustomWidget) {
   JFCustomWidget.subscribe('ready', function () {
     try {
       var settings = JFCustomWidget.getWidgetSettings ? JFCustomWidget.getWidgetSettings() : null;
     } catch (e) {}
-    // Champ non obligatoire : valid:true des le depart pour ne jamais bloquer
-    // la soumission, meme si l'iframe est (re)initialise tardivement.
-    try { JFCustomWidget.sendData({ value: '', valid: true }); } catch (e) {}
+    // Priorite a la restauration d'un etat sauvegarde (rechargement a froid
+    // de l'iframe apres une verification deja faite plus tot dans le
+    // formulaire). Si rien a restaurer (tout premier chargement), on
+    // envoie une valeur vide neutre, valid:true pour ne jamais bloquer la
+    // soumission (ce champ n'a pas de toggle "Required" natif cote JotForm).
+    var restored = restoreState();
+    if (!restored) {
+      try { JFCustomWidget.sendData({ value: '', valid: true }); } catch (e) {}
+    }
     resize();
   });
   JFCustomWidget.subscribe('submit', function () {
